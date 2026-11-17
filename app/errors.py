@@ -29,6 +29,35 @@ class PoolAcquireTimeout(QueryServiceError):
     code = "acquire_timeout"
     http_status = 503
 
+    def __init__(self, message: str = "", extra: dict | None = None) -> None:
+        super().__init__(message, {"executed": False, **(extra or {})})
+
+
+class PoolClosed(QueryServiceError):
+    """Raised when shutdown started before a request could borrow a backend.
+
+    This is a definite "not executed" receipt: the request never sent SQL.
+    """
+
+    code = "pool_closed"
+    http_status = 503
+
+    def __init__(self, message: str = "", extra: dict | None = None) -> None:
+        super().__init__(message, {"executed": False, **(extra or {})})
+
+
+class ConnectionLost(QueryServiceError):
+    """The backend died after the statement was sent, and shutdown began
+    before a retry was possible.  No connection is rebuilt."""
+
+    code = "connection_lost"
+    http_status = 503
+
+    def __init__(self, message: str = "", extra: dict | None = None) -> None:
+        super().__init__(
+            message, {"executed": True, "retried": False, **(extra or {})}
+        )
+
 
 class QueryTimeout(QueryServiceError):
     """Raised when the statement did not finish before the total deadline."""

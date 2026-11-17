@@ -26,6 +26,21 @@ services:
       POOL_SIZE: "2"
     ports:
       - "8000:8000"
+    # SIGTERM starts the graceful drain: queued requests get an immediate
+    # pool_closed receipt, in-flight queries finish under their own deadline,
+    # then every backend is closed.  Give that drain time before SIGKILL.
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 volumes:
   pgdata:

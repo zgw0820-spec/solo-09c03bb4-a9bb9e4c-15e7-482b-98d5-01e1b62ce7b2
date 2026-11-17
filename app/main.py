@@ -9,6 +9,7 @@ Swagger UI is served at ``/docs``, ReDoc at ``/redoc``.
 from __future__ import annotations
 
 import logging
+import signal
 import time
 from contextlib import asynccontextmanager
 
@@ -33,12 +34,40 @@ executor = QueryExecutor(pool, settings)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     # Eagerly open both connections at startup; close them on shutdown.
     await pool.open()
+    # ASGI servers (uvicorn included) stop accepting connections and wait
+    # for in-flight *request tasks* before running the lifespan shutdown.
+    # Refuse new/queued work as soon as the termination signal arrives, or a
+    # request queued behind two busy backends would be handed a connection
+    # and execute SQL during shutdown.  ``close()`` still drains and closes.
+    previous = {}
+
+    def _begin_draining(signum, frame):  # noqa: ANN001 - signal signature
+        pool.start_draining()
+        prior = previous.get(signum)
+        if callable(prior):
+            prior(signum, frame)
+
+    try:
+        for signum in (getattr(signal, "SIGTERM", None),
+                       getattr(signal, "SIGINT", None)):
+            if signum is None:
+                continue
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, _begin_draining)
+    except ValueError:
+        # Not the main thread (e.g. an embedded test client): the server
+        # still drains via the lifespan shutdown below.
+        logger.info("signal handlers not installable here; "
+                    "draining starts at lifespan shutdown")
+        previous.clear()
     try:
         yield
     finally:
+        for signum, prior in previous.items():
+            signal.signal(signum, prior)
         await pool.close()
 
 
@@ -103,12 +132,21 @@ async def health() -> HealthResponse:
     responses={
         400: {"description": "SQL 不符合单条只读 SELECT 约束"},
         422: {"description": "请求体或截止时间不合法"},
-        503: {"description": "排队超时 / 连接被弃置"},
+        503: {
+            "description": (
+                "排队超时（acquire_timeout）或服务正在关闭"
+                "（pool_closed）；两者都明确未执行语句"
+            )
+        },
         504: {"description": "语句执行超过总截止时间"},
     },
 )
 async def query(body: QueryRequest) -> QueryResponse:
-    """执行一条只读 SELECT，``timeout_ms`` 是包含排队时间的总预算。"""
+    """执行一条只读 SELECT，``timeout_ms`` 是包含排队时间的总预算。
+
+    服务关闭开始后，已执行中的查询按原总期限收尾；仍在排队的请求立即
+    收到 ``503 pool_closed`` 且不会向数据库发送任何语句。
+    """
     if body.timeout_ms <= 0:
         raise InvalidDeadlineError("timeout_ms 必须为正整数")
 
